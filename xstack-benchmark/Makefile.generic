@@ -1,0 +1,85 @@
+CC=clang
+#CC=gcc
+POLLY_FLAGS+=-mllvm -polly -mllvm -polly-parallel -mllvm -polly-omp-backend=LLVM -mllvm -polly-scheduling=static -mllvm -polly-optimizer=none -mllvm -polly-tiling=false
+ifdef SPEC_DEFAULTS
+OBJFILES_BC = $(OBJS)
+else
+OBJFILES_BC?= $(shell find . -name \*.c -not -path \*.cbe.c | sed -e "s/\.c/.bc/" ) $(shell find . -name \*.C -not -path \*.cbe.C | sed -e "s/\.C/.bc/" ) $(shell find . -name \*.cpp -not -path \*.cbe.cpp | sed -e "s/\.cpp/.bc/" )  $(shell find . -name \*.cc -not -path \*.cbe.cc | sed -e "s/\.cc/.bc/" )
+endif
+
+RUN_TIMEOUT?=7200 # 2 hours.
+#ifdef SPEC_DEFAULTS
+#POLLY_OBJFILES_BC = $(OBJS)
+#else
+#POLLY_OBJFILES_BC?= $(shell find . -name \*.c | sed -e "s/\.c/_polly.bc/" ) $(shell find . -name \*.C | sed -e "s/\.C/_polly.bc/" ) $(shell find . -name \*.cpp | sed -e "s/\.cpp/_polly.bc/" )  $(shell find . -name \*.cc | sed -e "s/\.cc/_polly.bc/" )
+#endif
+
+PLAIN=benchmark
+LINK_FLAGS+=-fopenmp
+
+ifdef POLLY
+%.bc: %.c
+	clang -O2 -fno-unroll-loops -fno-lax-vector-conversions -fno-vectorize -fno-slp-vectorize $(POLLY_FLAGS) -g -c -emit-llvm $< -o $@
+	#$(CC) -O2 -fno-unroll-loops -fno-lax-vector-conversions -fno-vectorize -fno-slp-vectorize -mllvm -polly-overflow-tracking=never -mllvm -polly-ignore-aliasing -mllvm -polly-use-runtime-alias-checks=0 -mllvm -polly-codegen-emit-rtc-print -mllvm -polly -mllvm -polly-parallel -mllvm -polly-omp-backend=LLVM -mllvm -polly-scheduling=static -mllvm -polly-optimizer=none -mllvm -polly-tiling=false -g -c -emit-llvm $< -o $@
+	opt -loop-simplify $@ -S -o $@
+else
+%.bc: %.c
+	$(CC) -O2 -fopenmp -fno-unroll-loops -fno-lax-vector-conversions -fno-vectorize -fno-slp-vectorize -g -c -emit-llvm $< -o $@
+	opt -loop-simplify $@ -S -o $@
+endif
+
+$(PLAIN).bc : $(OBJFILES_BC)
+	llvm-link $(LLVM_LINK_FLAGS) $^ -o $@
+
+$(PLAIN).ll : $(PLAIN).bc
+	llvm-dis $^
+
+#$(PLAIN).exe : $(PLAIN).ll
+#	llc -filetype=obj $< -o $(PLAIN).bc
+#	$(CC) -g -O3 $(LINK_FLAGS) $< -o $@
+
+$(PLAIN).exe : $(BMARK).c
+	$(CC) -DPERF=1 -lm -g -O3 -fopenmp $< -o $@
+
+$(PLAIN).polly.bc : $(OBJFILES_BC)
+	llvm-link $(LLVM_LINK_FLAGS) $^ -o $@
+
+$(PLAIN).polly.ll : $(PLAIN).bc
+	llvm-dis $^
+
+$(PLAIN).polly.exe : $(PLAIN).ll
+	llc -filetype=obj $< -o $(PLAIN).bc
+	$(CC) -g -O3 $(LINK_FLAGS) $< -o $@
+
+$(PLAIN).cbe.c: $(PLAIN).ll
+	opt $< -o $(PLAIN).bc
+	llvm-cbe $(PLAIN).bc
+	llvm-dis $(PLAIN).bc #just for debugging
+
+$(PLAIN).cbe.exe: $(PLAIN).cbe.c
+	$(CC) -g -O3 $< $(LINK_FLAGS) -o $@
+
+$(PLAIN).gcc.cbe.exe: $(PLAIN).cbe.c
+	gcc -g -O3 $< $(LINK_FLAGS) -o $@
+
+check_correctness: $(PLAIN).cbe.exe $(PLAIN).exe
+	./$(PLAIN).exe $(TEST_ARGS) > $(PLAIN).out 2>&1
+	./$(PLAIN).cbe.exe $(TEST_ARGS) > $(PLAIN).cbe.out 2>&1
+	diff $(PLAIN).out $(PLAIN).cbe.out
+
+check_performance: $(PLAIN).cbe.exe $(PLAIN).exe $(PLAIN).polly.exe
+	regressions-watchdog $(RUN_TIMEOUT) $(CC)-seq.time ./$(PLAIN).exe $(PERF_ARGS) 
+	regressions-watchdog $(RUN_TIMEOUT) $(CC)-polly.time ./$(PLAIN).polly.exe $(PERF_ARGS) 
+	regressions-watchdog $(RUN_TIMEOUT) $(CC)-dec.time ./$(PLAIN).cbe.exe $(PERF_ARGS)
+	
+check_seq: $(PLAIN).exe
+	regressions-watchdog $(RUN_TIMEOUT) $(CC)-seq.time ./$(PLAIN).exe $(PERF_ARGS) 
+
+check_dec: $(PLAIN).cbe.exe #$(PLAIN).exe $(PLAIN).polly.exe
+	regressions-watchdog $(RUN_TIMEOUT) $(CC)-dec.time ./$(PLAIN).cbe.exe $(PERF_ARGS)
+
+check_out: $(PLAIN).exe
+	./$(PLAIN).exe $(TEST_ARGS) > $(PLAIN).out 2>&1
+
+clean:
+	rm -rf *.bc *.out *.ll *.cbe.c *.exe *.o

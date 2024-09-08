@@ -1,0 +1,1 @@
+export PATH="/home/ah7226/xstack-benchmark/polybench-cuda:$PATH"
